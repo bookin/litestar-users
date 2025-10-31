@@ -588,12 +588,14 @@ class BaseUserService(Generic[SQLAUserT, SQLARoleT, SQLAOAuthAccountT]):  # pyli
         state_secret: str,
         oauth_account_dict: dict[str, Any],
         request: Request | None = None,
+        profile: dict[str, Any] | None = None,
     ) -> SQLAUserT:
         if self.oauth2_repository is None:
             raise ImproperlyConfiguredException("oauth2 has not been configured")
         user: SQLAUserT | None
         try:
-            decode_jwt(state, state_secret, [STATE_TOKEN_AUDIENCE])
+            if state is not None:
+                decode_jwt(state, state_secret, [STATE_TOKEN_AUDIENCE])
         except jwt.DecodeError as exc:
             raise HTTPException(status_code=status_codes.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         try:
@@ -613,11 +615,14 @@ class BaseUserService(Generic[SQLAUserT, SQLARoleT, SQLAOAuthAccountT]):  # pyli
                 # Create account
                 password = self.password_manager.generate()
                 user_dict = {
+                    "name": profile["name"] if profile else None,
+                    "avatar": profile["picture"] if profile else None,
                     "email": account_email,
                     "password_hash": self.password_manager.hash(password),
                     "is_verified": is_verified_by_default,
                     "is_active": True,
                 }
+                await self.pre_registration_hook(user_dict, request)
                 user = await self.user_repository.add(self.user_model(**user_dict))  # type: ignore[arg-type]
                 user = await self.oauth2_repository.add_oauth_account(user, oauth_account_dict)
                 await self.post_registration_hook(user, request)
@@ -630,6 +635,7 @@ class BaseUserService(Generic[SQLAUserT, SQLARoleT, SQLAOAuthAccountT]):  # pyli
                         cast(SQLAOAuthAccountT, existing_oauth_account),
                         oauth_account_dict,
                     )
+            await self.post_login_hook(user, request)
 
         return user
 
@@ -725,6 +731,7 @@ class BaseUserService(Generic[SQLAUserT, SQLARoleT, SQLAOAuthAccountT]):  # pyli
         token = await oauth_client.get_access_token(_code, _redirect_url, data["code_verifier"])
         state = data["state"]
         account_id, account_email = await oauth_client.get_id_email(token["access_token"])
+        profile = await oauth_client.get_profile(token["access_token"])
 
         if account_email is None:
             raise HTTPException(
@@ -760,6 +767,7 @@ class BaseUserService(Generic[SQLAUserT, SQLARoleT, SQLAOAuthAccountT]):  # pyli
                 state_secret=state_secret,
                 oauth_account_dict=oauth_account_dict,
                 request=request,
+                profile=profile,
             )
 
         return user

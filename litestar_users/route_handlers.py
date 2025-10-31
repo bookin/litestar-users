@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
+import json
 from typing import TYPE_CHECKING, Annotated, Any, Union, cast
 
+import jwt
 from litestar import Request, Response, Router, delete, get, patch, post, put, status_codes
+from litestar.datastructures import URL
 from litestar.di import Provide
 from litestar.enums import MediaType
 from litestar.exceptions import (
@@ -12,13 +16,16 @@ from litestar.exceptions import (
     PermissionDeniedException,
 )
 from litestar.params import Parameter
+from litestar.response import Redirect
 from litestar.security.jwt import JWTAuth, JWTCookieAuth
 from litestar.security.session_auth.auth import SessionAuth
 
 from litestar_users.adapter.sqlalchemy.protocols import SQLARoleT, SQLAUserT
 from litestar_users.dependencies import provide_user_service
 from litestar_users.dtos import OAuthAuthorizeDTO
+from litestar_users.jwt import decode_jwt
 from litestar_users.schema import OAuth2AuthorizeSchema
+from litestar_users.service import UserServiceType, STATE_TOKEN_AUDIENCE, generate_state_token
 
 try:
     from httpx_oauth.oauth2 import BaseOAuth2
@@ -50,7 +57,6 @@ if TYPE_CHECKING:
         ResetPasswordSchema,
         UserRoleSchema,
     )
-    from litestar_users.service import UserServiceType
 
 
 def get_registration_handler(
@@ -126,7 +132,16 @@ def get_oauth2_handler(
         service: UserServiceType,
         request: Request,
         scopes: Union[list[str], None] = None,
+        state_param: Annotated[Union[str, None], Parameter(query="state")] = None,
     ) -> OAuth2AuthorizeSchema:
+        state_data: dict[str, str] | None = None
+        if state_param is not None:
+            padding = "=" * (-len(state_param) % 4)
+            state_param += padding
+            decoded_bytes = base64.urlsafe_b64decode(state_param)
+            decoded_json = decoded_bytes.decode("utf-8")
+            state_data: dict[str, str] = json.loads(decoded_json)
+
         """OAuth2 route."""
         return await service.oauth2_authorize(
             scopes=scopes,
@@ -135,6 +150,7 @@ def get_oauth2_handler(
             state_secret=state_secret,
             redirect_url=redirect_url,
             callback_route_name=callback_route_name,
+            state_data=state_data,
         )
 
     @get(
@@ -156,6 +172,18 @@ def get_oauth2_handler(
         error_param: Annotated[Union[str, None], Parameter(query="error")] = None,
     ) -> Response[SQLAUserT]:
         """OAuth2 callback route."""
+        try:
+            state_data = decode_jwt(state_param, state_secret, [STATE_TOKEN_AUDIENCE])
+            if state_data is not None and state_data.get("client") == "desktop" and state_data.get("redirect_url"):
+                redirect_url_obj = URL(state_data["redirect_url"])
+                query_params = request.query_params
+                del state_data['client']
+                query_params['state'] = generate_state_token(state_data, state_secret)
+                redirect_url_with_params = redirect_url_obj.with_replacements(query=query_params)
+                return Redirect(path=str(redirect_url_with_params), status_code=status_codes.HTTP_302_FOUND)
+        except jwt.DecodeError as exc:
+            raise HTTPException(status_code=status_codes.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
         user = await service.oauth2_callback(
             data={
                 "code": code_param,
