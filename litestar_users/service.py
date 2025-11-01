@@ -614,8 +614,14 @@ class BaseUserService(Generic[SQLAUserT, SQLARoleT, SQLAOAuthAccountT]):  # pyli
                     ) from None
                 # Create account
                 password = self.password_manager.generate()
+
+                if profile and profile.get("name"):
+                    account_name = profile["name"]
+                else:
+                    account_name = account_email.split("@")[0]
+
                 user_dict = {
-                    "name": profile["name"] if profile else None,
+                    "name": account_name,
                     "avatar": profile["picture"] if profile else None,
                     "email": account_email,
                     "password_hash": self.password_manager.hash(password),
@@ -731,7 +737,10 @@ class BaseUserService(Generic[SQLAUserT, SQLARoleT, SQLAOAuthAccountT]):  # pyli
         token = await oauth_client.get_access_token(_code, _redirect_url, data["code_verifier"])
         state = data["state"]
         account_id, account_email = await oauth_client.get_id_email(token["access_token"])
-        profile = await oauth_client.get_profile(token["access_token"])
+        try:
+            profile = await oauth_client.get_profile(token["access_token"])
+        except NotImplementedError:
+            profile = None
 
         if account_email is None:
             raise HTTPException(
