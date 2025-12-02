@@ -5,8 +5,8 @@ import json
 from typing import TYPE_CHECKING, Annotated, Any, Union, cast
 
 import jwt
-from litestar import Request, Response, Router, delete, get, patch, post, put, status_codes
-from litestar.datastructures import URL
+from litestar import Request, Response, Router, delete, get, patch, post, put, status_codes, route
+from litestar.datastructures import URL, MultiDict
 from litestar.di import Provide
 from litestar.enums import MediaType
 from litestar.exceptions import (
@@ -153,8 +153,9 @@ def get_oauth2_handler(
             state_data=state_data,
         )
 
-    @get(
+    @route(
         f"{path}/{oauth_client.name}/callback",
+        http_method=["GET", "POST"],
         dependencies={"service": Provide(provide_user_service, sync_to_thread=False)},
         exclude_from_auth=True,
         name=callback_route_name,
@@ -172,11 +173,21 @@ def get_oauth2_handler(
         error_param: Annotated[Union[str, None], Parameter(query="error")] = None,
     ) -> Response[SQLAUserT]:
         """OAuth2 callback route."""
+        query_params = request.query_params
+
+        # If POST read form data
+        if request.method == "POST":
+            form_data = await request.form()
+            query_params = MultiDict(form_data)
+            code_param = form_data.get("code") or code_param
+            code_verifier_param = form_data.get("code_verifier") or code_verifier_param
+            state_param = form_data.get("state") or state_param
+            error_param = form_data.get("error") or error_param
+
         try:
             state_data = decode_jwt(state_param, state_secret, [STATE_TOKEN_AUDIENCE])
             if state_data is not None and state_data.get("client") == "desktop" and state_data.get("redirect_url"):
                 redirect_url_obj = URL(state_data["redirect_url"])
-                query_params = request.query_params
                 del state_data['client']
                 query_params['state'] = generate_state_token(state_data, state_secret)
                 redirect_url_with_params = redirect_url_obj.with_replacements(query=query_params)
